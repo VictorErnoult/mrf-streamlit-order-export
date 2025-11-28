@@ -124,10 +124,14 @@ def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
     
     # Calculate HT amounts for each day
     amounts_df = daily_df.apply(calculate_ht, axis=1)
-    daily_df = pd.concat([daily_df, amounts_df], axis=1)
     
-    for _, row in daily_df.iterrows():
-        date = row["date_only"]
+    # Helper to safely get scalar value
+    def get_scalar(df, idx, col):
+        val = df.at[idx, col]
+        return val.item() if hasattr(val, 'item') else float(val)
+    
+    for idx in daily_df.index:
+        date = daily_df.at[idx, "date_only"]
         dt = datetime.combine(date, datetime.min.time())
         date_str = dt.strftime("%d%m%y")
         piece = f"{JOURNAL}{dt.strftime('%y%m%d')}"
@@ -147,19 +151,26 @@ def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
             })
         
         # Debit: clients
-        add_entry("clients", debit=float(row["total"]))
+        total_val = get_scalar(daily_df, idx, "total")
+        add_entry("clients", debit=total_val)
         
-        # Credits: TVA, sales, shipping (only if > 0)
-        if row["tva_20"] > 0:
-            add_entry("tva_20", credit=row["tva_20"])
-        if row["tva_55"] > 0:
-            add_entry("tva_55", credit=row["tva_55"])
-        if row["sales_55"] > 0:
-            add_entry("sales_55", credit=row["sales_55"])
-        if row["sales_20"] > 0:
-            add_entry("sales_20", credit=row["sales_20"])
-        if row["shipping"] > 0:
-            add_entry("shipping", credit=row["shipping"])
+        # Credits: TVA from original data, sales/shipping from calculated amounts
+        tva_20_val = get_scalar(daily_df, idx, "tva_20")
+        tva_55_val = get_scalar(daily_df, idx, "tva_55")
+        sales_55_val = get_scalar(amounts_df, idx, "sales_55")
+        sales_20_val = get_scalar(amounts_df, idx, "sales_20")
+        shipping_val = get_scalar(amounts_df, idx, "shipping")
+        
+        if tva_20_val > 0:
+            add_entry("tva_20", credit=tva_20_val)
+        if tva_55_val > 0:
+            add_entry("tva_55", credit=tva_55_val)
+        if sales_55_val > 0:
+            add_entry("sales_55", credit=sales_55_val)
+        if sales_20_val > 0:
+            add_entry("sales_20", credit=sales_20_val)
+        if shipping_val > 0:
+            add_entry("shipping", credit=shipping_val)
     
     return pd.DataFrame(entries, columns=OUTPUT_COLUMNS)
 
