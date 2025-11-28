@@ -5,12 +5,12 @@ Transform Shopify order export CSV to accounting journal entries.
 Usage: python transform_order_export.py [input.csv] [-o output.csv]
 """
 
-import csv
 import sys
-from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+
+import pandas as pd
 
 # =============================================================================
 # CONFIGURATION - Edit these values as needed
@@ -35,85 +35,64 @@ OUTPUT_COLUMNS = [
 
 
 # =============================================================================
-# HELPERS
-# =============================================================================
-
-def parse_amount(value: str) -> Decimal:
-    """Parse monetary amount, returns 0 for empty values."""
-    if not value or not value.strip():
-        return Decimal("0")
-    return Decimal(value.replace(",", ".")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
-def parse_date(date_str: str) -> datetime | None:
-    """Parse Shopify date like '2025-10-20 18:13:20 +0200'."""
-    if not date_str or not date_str.strip():
-        return None
-    try:
-        return datetime.strptime(date_str[:10], "%Y-%m-%d")
-    except ValueError:
-        return None
-
-
-def is_reduced_rate(tax_name: str) -> bool:
-    """Check if tax name indicates 5.5% rate."""
-    return "5,5" in tax_name or "5.5" in tax_name
-
-
-# =============================================================================
 # CORE LOGIC
 # =============================================================================
 
-def read_orders(csv_path: str) -> dict:
+def read_orders(csv_path: str) -> pd.DataFrame:
     """Read CSV and extract order totals (first row of each order has the data)."""
-    orders = {}
+    df = pd.read_csv(csv_path, encoding="utf-8")
     
-    with open(csv_path, encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            order_name = row.get("Name", "").strip()
-            if not order_name or order_name in orders:
-                continue  # Skip empty or already-seen orders
-            
-            # Get tax amounts
-            tva_20, tva_55 = Decimal("0"), Decimal("0")
-            for i in [1, 2]:
-                tax_name = row.get(f"Tax {i} Name", "")
-                tax_value = parse_amount(row.get(f"Tax {i} Value", "0"))
-                if is_reduced_rate(tax_name):
-                    tva_55 += tax_value
-                elif tax_value > 0:
-                    tva_20 += tax_value
-            
-            orders[order_name] = {
-                "date": parse_date(row.get("Paid at") or row.get("Created at", "")),
-                "total": parse_amount(row.get("Total", "0")),
-                "shipping": parse_amount(row.get("Shipping", "0")),
-                "tva_20": tva_20,
-                "tva_55": tva_55,
-            }
+    # Keep only first row per order (drop duplicates on Name)
+    df = df[df["Name"].notna() & (df["Name"].str.strip() != "")].drop_duplicates(subset="Name", keep="first")
     
-    return orders
+    # Parse dates (use "Paid at" or fallback to "Created at")
+    date_col = df["Paid at"].fillna(df["Created at"])
+    df["date"] = pd.to_datetime(date_col.str[:10], format="%Y-%m-%d", errors="coerce")
+    
+    # Parse amounts (replace comma with dot, convert to float)
+    for col in ["Total", "Shipping", "Tax 1 Value", "Tax 2 Value"]:
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "."), errors="coerce").fillna(0)
+    
+    # Calculate TVA amounts
+    df["tva_20"] = 0.0
+    df["tva_55"] = 0.0
+    
+    for i in [1, 2]:
+        tax_name_col = f"Tax {i} Name"
+        tax_value_col = f"Tax {i} Value"
+        if tax_name_col in df.columns:
+            is_reduced = df[tax_name_col].astype(str).str.contains("5[,.]5", na=False, regex=True)
+            df["tva_55"] += df[tax_value_col].where(is_reduced, 0)
+            df["tva_20"] += df[tax_value_col].where(~is_reduced & (df[tax_value_col] > 0), 0)
+    
+    return df[["Name", "date", "Total", "Shipping", "tva_20", "tva_55"]].rename(columns={"Total": "total", "Shipping": "shipping"})
 
 
-def aggregate_by_date(orders: dict) -> dict:
+def aggregate_by_date(df: pd.DataFrame) -> pd.DataFrame:
     """Group orders by date, summing all amounts."""
-    daily = defaultdict(lambda: {"total": Decimal("0"), "shipping": Decimal("0"), 
-                                  "tva_20": Decimal("0"), "tva_55": Decimal("0")})
+    df = df[df["date"].notna()].copy()
+    df["date_only"] = df["date"].dt.date
     
-    for order in orders.values():
-        if order["date"]:
-            day = order["date"].date()
-            for key in ["total", "shipping", "tva_20", "tva_55"]:
-                daily[day][key] += order[key]
+    daily = df.groupby("date_only", as_index=False).agg({
+        "total": "sum",
+        "shipping": "sum",
+        "tva_20": "sum",
+        "tva_55": "sum"
+    })
     
-    return dict(daily)
+    return daily
 
 
-def calculate_ht(total: Decimal, shipping: Decimal, tva_20: Decimal, tva_55: Decimal) -> dict:
+def calculate_ht(row: pd.Series) -> pd.Series:
     """
     Calculate HT amounts from TTC values.
-    Returns dict with keys: tva_20, tva_55, sales_20, sales_55, shipping
+    Returns Series with keys: tva_20, tva_55, sales_20, sales_55, shipping
     """
+    total = Decimal(str(row["total"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    shipping = Decimal(str(row["shipping"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    tva_20 = Decimal(str(row["tva_20"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    tva_55 = Decimal(str(row["tva_55"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    
     # Shipping HT (assuming 20% VAT)
     shipping_ht = (shipping / Decimal("1.20")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if shipping else Decimal("0")
     shipping_tva = shipping - shipping_ht
@@ -130,53 +109,59 @@ def calculate_ht(total: Decimal, shipping: Decimal, tva_20: Decimal, tva_55: Dec
     if (diff := total - credits) != 0:
         sales_20 += diff
     
-    return {"tva_20": tva_20, "tva_55": tva_55, "sales_20": sales_20, "sales_55": sales_55, "shipping": shipping_ht}
+    return pd.Series({
+        "tva_20": float(tva_20),
+        "tva_55": float(tva_55),
+        "sales_20": float(sales_20),
+        "sales_55": float(sales_55),
+        "shipping": float(shipping_ht)
+    })
 
 
-def generate_entries(daily_data: dict) -> list[dict]:
+def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
     """Generate journal entries from daily aggregated data."""
     entries = []
     
-    for date in sorted(daily_data.keys()):
-        data = daily_data[date]
+    # Calculate HT amounts for each day
+    amounts_df = daily_df.apply(calculate_ht, axis=1)
+    daily_df = pd.concat([daily_df, amounts_df], axis=1)
+    
+    for _, row in daily_df.iterrows():
+        date = row["date_only"]
         dt = datetime.combine(date, datetime.min.time())
         date_str = dt.strftime("%d%m%y")
         piece = f"{JOURNAL}{dt.strftime('%y%m%d')}"
         
-        amounts = calculate_ht(data["total"], data["shipping"], data["tva_20"], data["tva_55"])
-        
-        def add_entry(account_key: str, debit: Decimal | str = "", credit: Decimal | str = ""):
+        def add_entry(account_key: str, debit: float | str = "", credit: float | str = ""):
             account, label = ACCOUNTS[account_key]
             entries.append({
-                "N° Compte": account, "Journal": JOURNAL, "Date écriture": date_str,
-                "Commentaire": label, "Montant débit": debit, "Montant crédit": credit,
-                "N° Pièce": piece, "Date échéance": "", "Lettrage": ""
+                "N° Compte": account,
+                "Journal": JOURNAL,
+                "Date écriture": date_str,
+                "Commentaire": label,
+                "Montant débit": debit if debit != "" else "",
+                "Montant crédit": credit if credit != "" else "",
+                "N° Pièce": piece,
+                "Date échéance": "",
+                "Lettrage": ""
             })
         
         # Debit: clients
-        add_entry("clients", debit=data["total"])
+        add_entry("clients", debit=float(row["total"]))
         
         # Credits: TVA, sales, shipping (only if > 0)
-        if amounts["tva_20"] > 0:
-            add_entry("tva_20", credit=amounts["tva_20"])
-        if amounts["tva_55"] > 0:
-            add_entry("tva_55", credit=amounts["tva_55"])
-        if amounts["sales_55"] > 0:
-            add_entry("sales_55", credit=amounts["sales_55"])
-        if amounts["sales_20"] > 0:
-            add_entry("sales_20", credit=amounts["sales_20"])
-        if amounts["shipping"] > 0:
-            add_entry("shipping", credit=amounts["shipping"])
+        if row["tva_20"] > 0:
+            add_entry("tva_20", credit=row["tva_20"])
+        if row["tva_55"] > 0:
+            add_entry("tva_55", credit=row["tva_55"])
+        if row["sales_55"] > 0:
+            add_entry("sales_55", credit=row["sales_55"])
+        if row["sales_20"] > 0:
+            add_entry("sales_20", credit=row["sales_20"])
+        if row["shipping"] > 0:
+            add_entry("shipping", credit=row["shipping"])
     
-    return entries
-
-
-def write_csv(entries: list[dict], path: str):
-    """Write entries to tab-separated CSV."""
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS, delimiter=";")
-        writer.writeheader()
-        writer.writerows(entries)
+    return pd.DataFrame(entries, columns=OUTPUT_COLUMNS)
 
 
 # =============================================================================
@@ -193,14 +178,16 @@ def main():
         sys.exit(f"Error: File not found: {input_path}")
     
     # Process
-    orders = read_orders(str(input_path))
-    daily = aggregate_by_date(orders)
-    entries = generate_entries(daily)
-    write_csv(entries, str(output_path))
+    orders_df = read_orders(str(input_path))
+    daily_df = aggregate_by_date(orders_df)
+    entries_df = generate_entries(daily_df)
+    
+    # Write CSV with semicolon delimiter and UTF-8 BOM for Excel compatibility
+    entries_df.to_csv(output_path, sep=";", index=False, encoding="utf-8-sig")
     
     # Summary
-    print(f"✓ Read {len(orders)} orders from {input_path.name}")
-    print(f"✓ Generated {len([e for e in entries if e['N° Compte']])} entries for {len(daily)} days")
+    print(f"✓ Read {len(orders_df)} orders from {input_path.name}")
+    print(f"✓ Generated {len(entries_df)} entries for {len(daily_df)} days")
     print(f"✓ Output: {output_path}")
 
 

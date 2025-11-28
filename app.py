@@ -32,21 +32,16 @@ if uploaded_file:
     
     # Process
     try:
-        orders = read_orders(tmp_path)
-        daily = aggregate_by_date(orders)
-        entries = generate_entries(daily)
-        
-        # Filter out empty separator rows for stats
-        real_entries = [e for e in entries if e["N° Compte"]]
+        orders_df = read_orders(tmp_path)
+        daily_df = aggregate_by_date(orders_df)
+        entries_df = generate_entries(daily_df)
         
         # Success message
-        st.success(f"✓ {len(orders)} commandes lues · {len(daily)} jours · {len(real_entries)} écritures")
+        st.success(f"✓ {len(orders_df)} commandes lues · {len(daily_df)} jours · {len(entries_df)} écritures")
         
-        # Create downloadable CSV
+        # Create downloadable CSV with semicolon delimiter and UTF-8 BOM for Excel compatibility
         output = StringIO()
-        output.write("\t".join(OUTPUT_COLUMNS) + "\n")
-        for entry in entries:
-            output.write("\t".join(str(entry.get(col, "")) for col in OUTPUT_COLUMNS) + "\n")
+        entries_df.to_csv(output, sep=";", index=False, encoding="utf-8-sig")
         
         st.download_button(
             label="⬇️ Télécharger le journal",
@@ -57,8 +52,7 @@ if uploaded_file:
         
         # Preview
         st.subheader("Aperçu")
-        df = pd.DataFrame(real_entries[:20])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(entries_df.head(20), use_container_width=True, hide_index=True)
         
     except Exception as e:
         st.error(f"Erreur: {e}")
