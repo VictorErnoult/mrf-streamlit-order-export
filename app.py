@@ -20,7 +20,7 @@ from utils import (
 
 st.set_page_config(page_title="Martha la Compta", page_icon="📊", layout="centered")
 
-st.title("Martha la Compta")
+st.title(":nerd_face: Martha la Compta ")
 st.subheader("📊 Shopify → Journal Comptable")
 st.caption("Transforme l'export CSV Shopify brut en journal comptable formaté pour Proginov.")
 
