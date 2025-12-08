@@ -71,7 +71,7 @@ if uploaded_file:
         
         # Preview
         st.subheader("Aperçu")
-        st.dataframe(entries_df.head(20), use_container_width=True, hide_index=True)
+        st.dataframe(entries_df.head(20), width='stretch', hide_index=True)
         
     except Exception as e:
         st.error(f"Erreur: {e}")

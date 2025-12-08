@@ -192,13 +192,17 @@ def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
                     return round(float(val), 2)
                 return val
             
+            # Use None instead of empty string for numeric columns to ensure Arrow compatibility
+            debit_val = round_if_numeric(debit) if debit != "" else None
+            credit_val = round_if_numeric(credit) if credit != "" else None
+            
             entries.append({
                 "N° Compte": account,
                 "Journal": JOURNAL,
                 "Date écriture": date_str,
                 "Commentaire": label,
-                "Montant débit": round_if_numeric(debit) if debit != "" else "",
-                "Montant crédit": round_if_numeric(credit) if credit != "" else "",
+                "Montant débit": debit_val,
+                "Montant crédit": credit_val,
                 "N° Pièce": piece,
                 "Date échéance": "",
                 "Lettrage": ""
