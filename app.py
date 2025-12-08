@@ -7,7 +7,6 @@ Deploy: Push to GitHub, connect to Streamlit Cloud
 
 import streamlit as st
 import pandas as pd
-from io import StringIO
 
 # Import core logic from utils module
 from utils import (
@@ -56,15 +55,18 @@ if uploaded_file:
         # Success message
         st.success(f"✓ {len(orders_df)} commandes lues · {len(daily_df)} jours · {len(entries_df)} écritures")
         
-        # Create downloadable CSV with semicolon delimiter and UTF-8 BOM for Excel compatibility
-        output = StringIO()
-        entries_df.to_csv(output, sep=";", index=False, encoding="utf-8-sig")
+        # Create downloadable Excel file
+        import io
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            entries_df.to_excel(writer, index=False, sheet_name="Journal")
+        output.seek(0)
         
         st.download_button(
             label="⬇️ Télécharger le journal",
             data=output.getvalue(),
-            file_name="journal_comptable.csv",
-            mime="text/csv"
+            file_name="journal_comptable.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
         # Preview
