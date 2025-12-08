@@ -9,25 +9,42 @@ import streamlit as st
 import pandas as pd
 from io import StringIO
 
-# Import core logic from the transform script
-from transform_order_export import (
-    read_orders, aggregate_by_date, generate_entries, OUTPUT_COLUMNS
+# Import core logic from utils module
+from utils import (
+    is_valid_csv,
+    read_orders,
+    aggregate_by_date,
+    generate_entries,
+    OUTPUT_COLUMNS
 )
 
-st.set_page_config(page_title="Export Comptable", page_icon="📊", layout="centered")
+st.set_page_config(page_title="Martha la Compta", page_icon="📊", layout="centered")
 
-st.title("📊 Shopify → Journal Comptable")
-st.caption("Transforme l'export CSV Shopify en écritures comptables")
+st.title("Martha la Compta")
+st.subheader("📊 Shopify → Journal Comptable")
+st.caption("Transforme l'export CSV Shopify brut en journal comptable formaté pour Proginov.")
 
 # File upload
-uploaded_file = st.file_uploader("Téléverser l'export Shopify (CSV)", type=["csv"])
+uploaded_file = st.file_uploader("Ajoute l'export Shopify (CSV)", type=["csv"])
 
 if uploaded_file:
+
+    # Read file content once
+    content_bytes = uploaded_file.getvalue()
+    
+    # Check if the file is a valid CSV
+    is_valid, error_msg, detected_encoding = is_valid_csv(content_bytes)
+    
+    if not is_valid:
+        st.error(f"❌ Fichier invalide: {error_msg}")
+        st.stop()
+    
+
     # Save to temp file for processing
     import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding="utf-8") as tmp:
-        content = uploaded_file.getvalue().decode("utf-8")
-        tmp.write(content)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False, encoding=detected_encoding) as tmp:
+        content_str = content_bytes.decode(detected_encoding)
+        tmp.write(content_str)
         tmp_path = tmp.name
     
     # Process
@@ -62,5 +79,5 @@ if uploaded_file:
     os.unlink(tmp_path)
 
 else:
-    st.info("👆 Téléversez un fichier CSV exporté depuis Shopify (Commandes → Exporter)")
+    st.info("👆 Insère un fichier CSV exporté depuis Shopify (Commandes → Exporter)")
 

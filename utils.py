@@ -1,16 +1,64 @@
-#!/usr/bin/env python3
 """
-Transform Shopify order export CSV to accounting journal entries.
-
-Usage: python transform_order_export.py [input.csv] [-o output.csv]
+Utility functions for CSV validation and order transformation processing.
 """
-
-import sys
-from datetime import datetime
-from decimal import Decimal, ROUND_HALF_UP
-from pathlib import Path
 
 import pandas as pd
+from io import StringIO
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def is_valid_csv(content_bytes: bytes) -> tuple[bool, str, str]:
+    """
+    Validate that the uploaded file content is a valid CSV with required columns.
+    
+    Args:
+        content_bytes: The file content as bytes
+    
+    Returns:
+        (is_valid, error_message, encoding): Tuple of boolean, error message, and detected encoding
+    """
+    try:
+        # Try different encodings
+        content_str = None
+        detected_encoding = None
+        for encoding in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+            try:
+                content_str = content_bytes.decode(encoding)
+                detected_encoding = encoding
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if content_str is None:
+            return False, "Impossible de décoder le fichier. Vérifiez l'encodage.", "utf-8"
+        
+        # Try to parse as CSV with pandas
+        # pandas can auto-detect delimiter, but we'll try common ones
+        df = None
+        for delimiter in [',', ';', '\t']:
+            try:
+                df = pd.read_csv(StringIO(content_str), delimiter=delimiter, nrows=5)
+                if len(df.columns) > 1:  # Valid CSV should have multiple columns
+                    break
+            except (pd.errors.ParserError, ValueError):
+                continue
+        
+        if df is None or len(df.columns) < 2:
+            return False, "Le fichier ne semble pas être un CSV valide (pas assez de colonnes).", detected_encoding
+        
+        # Check for required columns (at minimum, we need "Name" column)
+        required_columns = ["Name"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            return False, f"Colonnes requises manquantes: {', '.join(missing_columns)}. Vérifiez que c'est bien un export Shopify.", detected_encoding
+        
+        return True, "", detected_encoding
+        
+    except Exception as e:
+        return False, f"Erreur lors de la validation: {str(e)}", "utf-8"
+
 
 # =============================================================================
 # CONFIGURATION - Edit these values as needed
@@ -174,33 +222,3 @@ def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
     
     return pd.DataFrame(entries, columns=OUTPUT_COLUMNS)
 
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
-def main():
-    # Parse args
-    args = sys.argv[1:]
-    input_path = Path(args[0]) if args and not args[0].startswith("-") else Path(__file__).parent / "orders_export.csv"
-    output_path = Path(args[args.index("-o") + 1]) if "-o" in args else input_path.with_stem(f"{input_path.stem}_journal")
-    
-    if not input_path.exists():
-        sys.exit(f"Error: File not found: {input_path}")
-    
-    # Process
-    orders_df = read_orders(str(input_path))
-    daily_df = aggregate_by_date(orders_df)
-    entries_df = generate_entries(daily_df)
-    
-    # Write CSV with semicolon delimiter and UTF-8 BOM for Excel compatibility
-    entries_df.to_csv(output_path, sep=";", index=False, encoding="utf-8-sig")
-    
-    # Summary
-    print(f"✓ Read {len(orders_df)} orders from {input_path.name}")
-    print(f"✓ Generated {len(entries_df)} entries for {len(daily_df)} days")
-    print(f"✓ Output: {output_path}")
-
-
-if __name__ == "__main__":
-    main()
