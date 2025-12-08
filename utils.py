@@ -186,13 +186,19 @@ def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
         
         def add_entry(account_key: str, debit: float | str = "", credit: float | str = ""):
             account, label = ACCOUNTS[account_key]
+            # Round numeric values to 2 decimal places to avoid floating point precision issues
+            def round_if_numeric(val):
+                if isinstance(val, (int, float)):
+                    return round(float(val), 2)
+                return val
+            
             entries.append({
                 "N° Compte": account,
                 "Journal": JOURNAL,
                 "Date écriture": date_str,
                 "Commentaire": label,
-                "Montant débit": debit if debit != "" else "",
-                "Montant crédit": credit if credit != "" else "",
+                "Montant débit": round_if_numeric(debit) if debit != "" else "",
+                "Montant crédit": round_if_numeric(credit) if credit != "" else "",
                 "N° Pièce": piece,
                 "Date échéance": "",
                 "Lettrage": ""
