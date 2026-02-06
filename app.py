@@ -1,5 +1,5 @@
 """
-Streamlit app for transforming Shopify order exports to accounting journal entries.
+Streamlit app for transforming Suffio invoice exports to accounting journal entries.
 
 Run locally: streamlit run app.py
 Deploy: Push to GitHub, connect to Streamlit Cloud
@@ -11,7 +11,7 @@ import pandas as pd
 # Import core logic from utils module
 from utils import (
     is_valid_csv,
-    read_orders,
+    read_invoices,
     aggregate_by_date,
     generate_entries,
     OUTPUT_COLUMNS
@@ -20,11 +20,11 @@ from utils import (
 st.set_page_config(page_title="Martha la Compta", page_icon="📊", layout="centered")
 
 st.title(":nerd_face: Martha la Compta ")
-st.subheader("📊 Shopify → Journal Comptable")
-st.caption("Transforme l'export CSV Shopify brut en journal comptable formaté pour Proginov.")
+st.subheader("📊 Suffio → Journal Comptable")
+st.caption("Transforme l'export CSV Suffio en journal comptable formaté pour Proginov.")
 
 # File upload
-uploaded_file = st.file_uploader("Ajoute l'export Shopify (CSV)", type=["csv"])
+uploaded_file = st.file_uploader("Ajoute l'export Suffio (CSV)", type=["csv"])
 
 if uploaded_file:
 
@@ -48,12 +48,12 @@ if uploaded_file:
     
     # Process
     try:
-        orders_df = read_orders(tmp_path)
-        daily_df = aggregate_by_date(orders_df)
+        invoices_df = read_invoices(tmp_path)
+        daily_df = aggregate_by_date(invoices_df)
         entries_df = generate_entries(daily_df)
         
         # Success message
-        st.success(f"✓ {len(orders_df)} commandes lues · {len(daily_df)} jours · {len(entries_df)} écritures")
+        st.success(f"✓ {len(invoices_df)} factures lues · {len(daily_df)} jours · {len(entries_df)} écritures")
         
         # Create downloadable Excel file
         import io
@@ -81,5 +81,5 @@ if uploaded_file:
     os.unlink(tmp_path)
 
 else:
-    st.info("👆 Insère un fichier CSV exporté depuis Shopify (Commandes → Exporter)")
+    st.info("👆 Insère un fichier CSV exporté depuis Suffio (Factures → Exporter)")
 

@@ -1,5 +1,8 @@
 """
-Utility functions for CSV validation and order transformation processing.
+Utility functions for CSV validation and invoice transformation processing.
+
+Input:  Suffio invoice export (CSV)
+Output: Accounting journal entries (Proginov format)
 """
 
 import pandas as pd
@@ -34,12 +37,11 @@ def is_valid_csv(content_bytes: bytes) -> tuple[bool, str, str]:
             return False, "Impossible de décoder le fichier. Vérifiez l'encodage.", "utf-8"
         
         # Try to parse as CSV with pandas
-        # pandas can auto-detect delimiter, but we'll try common ones
         df = None
         for delimiter in [',', ';', '\t']:
             try:
                 df = pd.read_csv(StringIO(content_str), delimiter=delimiter, nrows=5)
-                if len(df.columns) > 1:  # Valid CSV should have multiple columns
+                if len(df.columns) > 1:
                     break
             except (pd.errors.ParserError, ValueError):
                 continue
@@ -47,12 +49,12 @@ def is_valid_csv(content_bytes: bytes) -> tuple[bool, str, str]:
         if df is None or len(df.columns) < 2:
             return False, "Le fichier ne semble pas être un CSV valide (pas assez de colonnes).", detected_encoding
         
-        # Check for required columns (at minimum, we need "Name" column)
-        required_columns = ["Name"]
+        # Check for required columns (Suffio format)
+        required_columns = ["Number", "Issue date", "Invoice total", "Line item total"]
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
-            return False, f"Colonnes requises manquantes: {', '.join(missing_columns)}. Vérifiez que c'est bien un export Shopify.", detected_encoding
+            return False, f"Colonnes requises manquantes: {', '.join(missing_columns)}. Vérifiez que c'est bien un export Suffio.", detected_encoding
         
         return True, "", detected_encoding
         
@@ -86,97 +88,163 @@ OUTPUT_COLUMNS = [
 # CORE LOGIC
 # =============================================================================
 
-def read_orders(csv_path: str) -> pd.DataFrame:
-    """Read CSV and extract order totals (first row of each order has the data)."""
-    df = pd.read_csv(csv_path, encoding="utf-8")
+def _is_shipping_line(line_item_name: str, line_item_desc: str) -> bool:
+    """
+    Determine if a line item represents shipping.
     
-    # Keep only first row per order (drop duplicates on Name)
-    df = df[df["Name"].notna() & (df["Name"].str.strip() != "")].drop_duplicates(subset="Name", keep="first")
+    Shipping if the name contains "Livraison" or "DPD" (case-insensitive)
+    AND the description does NOT contain "SKU".
+    """
+    name = str(line_item_name).lower()
+    desc = str(line_item_desc).lower()
+    has_shipping_keyword = "livraison" in name or "dpd" in name
+    has_sku = "sku" in desc
+    return has_shipping_keyword and not has_sku
+
+
+def _parse_tax_rate(rate_str: str) -> Decimal:
+    """Parse a tax rate string like '20%' or '5.5%' into a Decimal (e.g. 0.20)."""
+    cleaned = str(rate_str).strip().replace("%", "").replace(",", ".")
+    try:
+        return Decimal(cleaned) / Decimal("100")
+    except Exception:
+        return Decimal("0")
+
+
+def _safe_decimal(value) -> Decimal:
+    """Convert a value to Decimal, handling NaN and empty strings."""
+    if pd.isna(value) or str(value).strip() == "":
+        return Decimal("0")
+    return Decimal(str(value).strip().replace(",", "."))
+
+
+def read_invoices(csv_path: str) -> pd.DataFrame:
+    """
+    Read a Suffio invoice export CSV and extract per-invoice accounting amounts.
     
-    # Parse dates (use "Paid at" or fallback to "Created at")
-    date_col = df["Paid at"].fillna(df["Created at"])
-    df["date"] = pd.to_datetime(date_col.str[:10], format="%Y-%m-%d", errors="coerce")
+    The Suffio format has multiple rows per invoice (one per line item).
+    The first row of each invoice carries invoice-level data (Number, Issue date,
+    Invoice total, etc.), while subsequent rows only carry line-item data.
     
-    # Parse amounts (replace comma with dot, convert to float)
-    for col in ["Total", "Shipping", "Tax 1 Value", "Tax 2 Value"]:
-        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", "."), errors="coerce").fillna(0)
+    Returns a DataFrame with one row per invoice and columns:
+        number, date, total_ttc, tva_20, tva_55, sales_20_ht, sales_55_ht, shipping_ht
     
-    # Calculate TVA amounts
-    df["tva_20"] = 0.0
-    df["tva_55"] = 0.0
+    Returns are detected via the 'Amount due' column (non-zero = return) and have
+    their amounts negated so they subtract from daily totals during aggregation.
+    """
+    df = pd.read_csv(csv_path, encoding="utf-8", dtype=str)
     
-    for i in [1, 2]:
-        tax_name_col = f"Tax {i} Name"
-        tax_value_col = f"Tax {i} Value"
-        if tax_name_col in df.columns:
-            is_reduced = df[tax_name_col].astype(str).str.contains("5[,.]5", na=False, regex=True)
-            df["tva_55"] += df[tax_value_col].where(is_reduced, 0)
-            df["tva_20"] += df[tax_value_col].where(~is_reduced & (df[tax_value_col] > 0), 0)
+    # Forward-fill the invoice Number so every line item row knows its parent invoice
+    df["Number"] = df["Number"].replace("", pd.NA)
+    df["Number"] = df["Number"].ffill()
     
-    return df[["Name", "date", "Total", "Shipping", "tva_20", "tva_55"]].rename(columns={"Total": "total", "Shipping": "shipping"})
+    # Drop rows that have no line item data at all (e.g. trailing empty rows)
+    df = df[df["Line item total"].notna() & (df["Line item total"].str.strip() != "")]
+    
+    # Extract invoice-level data from first occurrence of each invoice
+    invoice_header = df.groupby("Number").first().reset_index()
+    
+    invoices = []
+    
+    for _, header in invoice_header.iterrows():
+        inv_number = header["Number"]
+        
+        # Parse date (always Issue date)
+        date = pd.to_datetime(header.get("Issue date", ""), format="%Y-%m-%d", errors="coerce")
+        
+        # Determine if this is a return: Amount due > 0 means return
+        amount_due = _safe_decimal(header.get("Amount due", "0"))
+        paid_total = _safe_decimal(header.get("Paid total", "0"))
+        sign = Decimal("-1") if amount_due > 0 and paid_total == 0 else Decimal("1")
+        
+        # Get all line items for this invoice
+        inv_lines = df[df["Number"] == inv_number]
+        
+        tva_20 = Decimal("0")
+        tva_55 = Decimal("0")
+        sales_20_ht = Decimal("0")
+        sales_55_ht = Decimal("0")
+        shipping_ht = Decimal("0")
+        total_ttc = Decimal("0")
+        
+        for _, line in inv_lines.iterrows():
+            line_total = _safe_decimal(line.get("Line item total", "0"))
+            line_tax = _safe_decimal(line.get("Line item tax amount", "0"))
+            line_ht = line_total - line_tax
+            total_ttc += line_total
+            
+            # Determine tax rate from "Line item tax 1 rate"
+            rate = _parse_tax_rate(line.get("Line item tax 1 rate", "0"))
+            is_reduced = abs(rate - Decimal("0.055")) < Decimal("0.01")
+            
+            is_shipping = _is_shipping_line(
+                line.get("Line item", ""),
+                line.get("Line item description", "")
+            )
+            
+            if is_reduced:
+                tva_55 += line_tax
+                sales_55_ht += line_ht
+            else:
+                tva_20 += line_tax
+                if is_shipping:
+                    shipping_ht += line_ht
+                else:
+                    sales_20_ht += line_ht
+        
+        # Rounding adjustment: ensure total_ttc == tva_20 + tva_55 + sales_20_ht + sales_55_ht + shipping_ht
+        credits_sum = tva_20 + tva_55 + sales_20_ht + sales_55_ht + shipping_ht
+        if (diff := total_ttc - credits_sum) != 0:
+            sales_20_ht += diff
+        
+        # Apply sign (returns become negative)
+        invoices.append({
+            "number": inv_number,
+            "date": date,
+            "total_ttc": float(sign * total_ttc.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "tva_20": float(sign * tva_20.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "tva_55": float(sign * tva_55.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "sales_20_ht": float(sign * sales_20_ht.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "sales_55_ht": float(sign * sales_55_ht.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+            "shipping_ht": float(sign * shipping_ht.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+        })
+    
+    return pd.DataFrame(invoices)
 
 
 def aggregate_by_date(df: pd.DataFrame) -> pd.DataFrame:
-    """Group orders by date, summing all amounts."""
+    """
+    Group invoices by date, summing all amount columns.
+    
+    Returns are already negative, so they naturally subtract from daily totals.
+    """
     df = df[df["date"].notna()].copy()
     df["date_only"] = df["date"].dt.date
     
-    daily = df.groupby("date_only", as_index=False).agg({
-        "total": "sum",
-        "shipping": "sum",
-        "tva_20": "sum",
-        "tva_55": "sum"
-    })
+    amount_cols = ["total_ttc", "tva_20", "tva_55", "sales_20_ht", "sales_55_ht", "shipping_ht"]
+    daily = df.groupby("date_only", as_index=False)[amount_cols].sum()
     
     return daily
 
 
-def calculate_ht(row: pd.Series) -> pd.Series:
-    """
-    Calculate HT amounts from TTC values.
-    Returns Series with keys: tva_20, tva_55, sales_20, sales_55, shipping
-    """
-    total = Decimal(str(row["total"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    shipping = Decimal(str(row["shipping"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    tva_20 = Decimal(str(row["tva_20"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    tva_55 = Decimal(str(row["tva_55"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    
-    # Shipping HT (assuming 20% VAT)
-    shipping_ht = (shipping / Decimal("1.20")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if shipping else Decimal("0")
-    shipping_tva = shipping - shipping_ht
-    
-    # Product TVA at 20% = total TVA 20% minus shipping TVA
-    product_tva_20 = max(Decimal("0"), tva_20 - shipping_tva)
-    
-    # HT from TVA amounts
-    sales_20 = (product_tva_20 / Decimal("0.20")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if product_tva_20 else Decimal("0")
-    sales_55 = (tva_55 / Decimal("0.055")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if tva_55 else Decimal("0")
-    
-    # Adjust for rounding to ensure balance (debit = sum of credits)
-    credits = tva_20 + tva_55 + sales_20 + sales_55 + shipping_ht
-    if (diff := total - credits) != 0:
-        sales_20 += diff
-    
-    return pd.Series({
-        "tva_20": float(tva_20),
-        "tva_55": float(tva_55),
-        "sales_20": float(sales_20),
-        "sales_55": float(sales_55),
-        "shipping": float(shipping_ht)
-    })
-
-
 def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
-    """Generate journal entries from daily aggregated data."""
+    """
+    Generate journal entries from daily aggregated data.
+    
+    HT amounts are already computed in the DataFrame (from line-item parsing),
+    so no reverse-calculation is needed.
+    
+    Each day produces up to 6 lines:
+      - Clients (debit: total TTC)
+      - TVA 20% (credit)
+      - TVA 5,5% (credit)
+      - Ventes produits TVA réduite (credit: sales HT at 5.5%)
+      - Ventes marchandises TVA normale (credit: sales HT at 20%)
+      - Ports et frais accessoires (credit: shipping HT)
+    
+    Lines with a zero amount are skipped.
+    """
     entries = []
-    
-    # Calculate HT amounts for each day
-    amounts_df = daily_df.apply(calculate_ht, axis=1)
-    
-    # Helper to safely get scalar value
-    def get_scalar(df, idx, col):
-        val = df.at[idx, col]
-        return val.item() if hasattr(val, 'item') else float(val)
     
     for idx in daily_df.index:
         date = daily_df.at[idx, "date_only"]
@@ -186,13 +254,12 @@ def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
         
         def add_entry(account_key: str, debit: float | str = "", credit: float | str = ""):
             account, label = ACCOUNTS[account_key]
-            # Round numeric values to 2 decimal places to avoid floating point precision issues
+            
             def round_if_numeric(val):
                 if isinstance(val, (int, float)):
                     return round(float(val), 2)
                 return val
             
-            # Use None instead of empty string for numeric columns to ensure Arrow compatibility
             debit_val = round_if_numeric(debit) if debit != "" else None
             credit_val = round_if_numeric(credit) if credit != "" else None
             
@@ -208,27 +275,33 @@ def generate_entries(daily_df: pd.DataFrame) -> pd.DataFrame:
                 "Lettrage": ""
             })
         
-        # Debit: clients
-        total_val = get_scalar(daily_df, idx, "total")
-        add_entry("clients", debit=total_val)
+        # Helper to safely get scalar value
+        def get_val(col):
+            val = daily_df.at[idx, col]
+            return round(val.item() if hasattr(val, 'item') else float(val), 2)
         
-        # Credits: TVA from original data, sales/shipping from calculated amounts
-        tva_20_val = get_scalar(daily_df, idx, "tva_20")
-        tva_55_val = get_scalar(daily_df, idx, "tva_55")
-        sales_55_val = get_scalar(amounts_df, idx, "sales_55")
-        sales_20_val = get_scalar(amounts_df, idx, "sales_20")
-        shipping_val = get_scalar(amounts_df, idx, "shipping")
+        total_ttc = get_val("total_ttc")
+        tva_20 = get_val("tva_20")
+        tva_55 = get_val("tva_55")
+        sales_55_ht = get_val("sales_55_ht")
+        sales_20_ht = get_val("sales_20_ht")
+        shipping_ht = get_val("shipping_ht")
         
-        if tva_20_val > 0:
-            add_entry("tva_20", credit=tva_20_val)
-        if tva_55_val > 0:
-            add_entry("tva_55", credit=tva_55_val)
-        if sales_55_val > 0:
-            add_entry("sales_55", credit=sales_55_val)
-        if sales_20_val > 0:
-            add_entry("sales_20", credit=sales_20_val)
-        if shipping_val > 0:
-            add_entry("shipping", credit=shipping_val)
+        # Debit: clients (total TTC)
+        if total_ttc != 0:
+            add_entry("clients", debit=total_ttc)
+        
+        # Credits
+        if tva_20 != 0:
+            add_entry("tva_20", credit=tva_20)
+        if tva_55 != 0:
+            add_entry("tva_55", credit=tva_55)
+        if sales_55_ht != 0:
+            add_entry("sales_55", credit=sales_55_ht)
+        if sales_20_ht != 0:
+            add_entry("sales_20", credit=sales_20_ht)
+        if shipping_ht != 0:
+            add_entry("shipping", credit=shipping_ht)
     
     return pd.DataFrame(entries, columns=OUTPUT_COLUMNS)
 
