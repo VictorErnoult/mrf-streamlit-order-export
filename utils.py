@@ -105,10 +105,17 @@ def _is_shipping_line(line_item_name: str, line_item_desc: str) -> bool:
 def _parse_tax_rate(rate_str: str) -> Decimal:
     """Parse a tax rate string like '20%' or '5.5%' into a Decimal (e.g. 0.20)."""
     cleaned = str(rate_str).strip().replace("%", "").replace(",", ".")
+    # Handle empty / non-numeric / NaN-like values explicitly
+    if cleaned == "" or cleaned.lower() in {"nan", "inf", "-inf"}:
+        return Decimal("0")
     try:
-        return Decimal(cleaned) / Decimal("100")
+        value = Decimal(cleaned)
     except Exception:
         return Decimal("0")
+    # Guard against Decimal NaN values that would break comparisons later
+    if value.is_nan():
+        return Decimal("0")
+    return value / Decimal("100")
 
 
 def _safe_decimal(value) -> Decimal:
