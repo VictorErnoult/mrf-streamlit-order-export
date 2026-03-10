@@ -162,6 +162,24 @@ def read_invoices(csv_path: str) -> pd.DataFrame:
         # Determine if this is a return: Amount due > 0 means return
         amount_due = _safe_decimal(header.get("Amount due", "0"))
         paid_total = _safe_decimal(header.get("Paid total", "0"))
+        invoice_total = _safe_decimal(header.get("Invoice total", "0"))
+        status = str(header.get("Status", "")).strip()
+        payment_method = str(header.get("Payment method", "")).strip()
+
+        # Exclude unpaid administrative mandates (e.g. Money Order) from the journal:
+        # - normal (positive) invoice total
+        # - not yet paid (Paid total empty/0, Amount due > 0)
+        # - still in Created status
+        # These are commitments, not realised sales yet.
+        if (
+            invoice_total > 0
+            and amount_due > 0
+            and paid_total == 0
+            and status == "Created"
+            and payment_method == "Money Order"
+        ):
+            continue
+
         sign = Decimal("-1") if amount_due > 0 and paid_total == 0 else Decimal("1")
         
         # Get all line items for this invoice
