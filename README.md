@@ -90,3 +90,17 @@ streamlit run app.py
 ## Déploiement
 
 Déployable gratuitement sur [Streamlit Cloud](https://share.streamlit.io).
+
+### Mot de passe (optionnel)
+
+L'application peut être protégée par un mot de passe via les secrets Streamlit. Si aucun secret n'est configuré, l'application reste en accès libre (pratique en local).
+
+Sur Streamlit Cloud : ouvrir l'application → **Settings** → **Secrets**, puis ajouter :
+
+```toml
+app_password = "votre-mot-de-passe"
+```
+
+En local, créer un fichier `.streamlit/secrets.toml` avec la même clé (ne pas le committer).
+
+Après avoir configuré le secret, recharger l'application et vérifier que le champ de mot de passe apparaît bien : un `secrets.toml` mal formé désactive silencieusement la protection.
