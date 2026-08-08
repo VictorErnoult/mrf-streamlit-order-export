@@ -5,6 +5,7 @@ Run locally: streamlit run app.py
 Deploy: Push to GitHub, connect to Streamlit Cloud
 """
 
+import hmac
 import io
 import traceback
 
@@ -21,6 +22,36 @@ from utils import (
 )
 
 st.set_page_config(page_title="Martha la Compta", page_icon="📊", layout="centered")
+
+
+def check_password() -> None:
+    """
+    Optional password gate.
+
+    If an "app_password" secret is configured (Streamlit Cloud secrets or a
+    local .streamlit/secrets.toml), require it before showing the app.
+    If no secret is configured, the app runs open as before.
+    """
+    try:
+        expected = st.secrets["app_password"]
+    except Exception:
+        # No secrets.toml or no "app_password" key: open access (local usage)
+        return
+
+    if st.session_state.get("password_ok"):
+        return
+
+    password = st.text_input("🔒 Mot de passe", type="password")
+    if not password:
+        st.stop()
+    if hmac.compare_digest(str(password), str(expected)):
+        st.session_state["password_ok"] = True
+        return
+    st.error("Mot de passe incorrect.")
+    st.stop()
+
+
+check_password()
 
 st.title(":nerd_face: Martha la Compta ")
 st.subheader("📊 Suffio → Journal Comptable")
