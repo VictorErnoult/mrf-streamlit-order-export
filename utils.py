@@ -25,7 +25,9 @@ def is_valid_csv(content_bytes: bytes) -> tuple[bool, str, str]:
         # Try different encodings
         content_str = None
         detected_encoding = None
-        for encoding in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']:
+        # cp1252 before latin-1: latin-1 decodes any byte sequence, so it would
+        # shadow cp1252 and turn Windows characters like € into mojibake.
+        for encoding in ['utf-8-sig', 'utf-8', 'cp1252', 'latin-1']:
             try:
                 content_str = content_bytes.decode(encoding)
                 detected_encoding = encoding
@@ -147,9 +149,10 @@ def read_invoices(csv_source) -> tuple[pd.DataFrame, list[dict]]:
         invoices_df: DataFrame with one row per invoice and columns:
             number, date, total_ttc, tva_20, tva_55, sales_20_ht, sales_55_ht, shipping_ht
         rounding_diffs: list of {"number": str, "diff": float} for invoices whose
-            declared 'Invoice total' differs from the sum of computed buckets by
-            more than ROUNDING_DIFF_THRESHOLD (the diff is still absorbed into
-            the 20% sales bucket, but the caller should warn the user).
+            declared 'Invoice total' differs from the line-derived total by more
+            than ROUNDING_DIFF_THRESHOLD. The declared header total is NOT used
+            to build the journal (amounts always come from the line sums); the
+            caller should surface these diffs as a warning.
 
     Returns are detected via the 'Amount due' column (non-zero = return) and have
     their amounts negated so they subtract from daily totals during aggregation.
@@ -246,7 +249,6 @@ def read_invoices(csv_source) -> tuple[pd.DataFrame, list[dict]]:
         if max(abs(diff), abs(declared_diff)) > ROUNDING_DIFF_THRESHOLD:
             reported = declared_diff if abs(declared_diff) >= abs(diff) else diff
             rounding_diffs.append({"number": inv_number, "diff": float(reported)})
-
 
         # Apply sign (returns become negative)
         invoices.append({

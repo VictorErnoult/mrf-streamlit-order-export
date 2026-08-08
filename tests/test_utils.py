@@ -43,17 +43,20 @@ def _read(csv_text: str):
 # ---------------------------------------------------------------------------
 
 def test_latin1_encoding_pass_through():
-    """A latin-1 Suffio export must validate AND parse with the same encoding."""
+    """A latin-1/cp1252 Suffio export must validate AND parse with the same encoding."""
     csv_text = "\n".join([
         HEADER,
         "F100,2026-07-02,Paid,Card,24.00,24.00,0,Livraison légère,Frais de déplacement,20%,4.00,24.00",
     ])
     content_bytes = csv_text.encode("latin-1")
 
-    # utf-8 decode fails on the accented bytes, so latin-1 must be detected
+    # utf-8 decode fails on the accented bytes. cp1252 is tried before latin-1
+    # (latin-1 decodes anything, so it must come last) and é (0xE9) is the same
+    # character in both, so the detected encoding decodes the text correctly.
     is_valid, error_msg, detected_encoding = is_valid_csv(content_bytes)
     assert is_valid, error_msg
-    assert detected_encoding == "latin-1"
+    assert detected_encoding == "cp1252"
+    assert content_bytes.decode(detected_encoding) == csv_text
 
     # Single decode with the detected encoding, then parse from memory
     decoded = content_bytes.decode(detected_encoding)
@@ -97,6 +100,28 @@ def test_subcent_diff_is_not_reported():
 
     assert len(invoices_df) == 1
     assert diffs == []
+
+
+def test_declared_header_total_is_ignored_and_reported():
+    """The journal is built from line sums; the declared header total is only
+    used for the warning, never trusted for amounts."""
+    csv_text = "\n".join([
+        HEADER,
+        "F202,2026-07-04,Paid,Card,105.00,105.00,0,Article,Desc article,20%,16.67,100.00",
+    ])
+    invoices_df, diffs = _read(csv_text)
+
+    # Amounts come from the lines, not the header
+    assert invoices_df.iloc[0]["total_ttc"] == pytest.approx(100.00)
+    # ...but the discrepancy is reported
+    assert len(diffs) == 1
+    assert diffs[0]["number"] == "F202"
+    assert diffs[0]["diff"] == pytest.approx(5.00)
+
+    # And the journal debit equals the line-derived total
+    daily_df = aggregate_by_date(invoices_df)
+    entries_df = generate_entries(daily_df)
+    assert entries_df["Montant débit"].fillna(0).sum() == pytest.approx(100.00)
 
 
 def test_exact_totals_report_nothing():

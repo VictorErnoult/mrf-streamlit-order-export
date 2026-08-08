@@ -102,3 +102,5 @@ app_password = "votre-mot-de-passe"
 ```
 
 En local, créer un fichier `.streamlit/secrets.toml` avec la même clé (ne pas le committer).
+
+Après avoir configuré le secret, recharger l'application et vérifier que le champ de mot de passe apparaît bien : un `secrets.toml` mal formé désactive silencieusement la protection.

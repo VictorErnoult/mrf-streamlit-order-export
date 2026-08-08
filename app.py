@@ -18,7 +18,6 @@ from utils import (
     read_invoices,
     aggregate_by_date,
     generate_entries,
-    OUTPUT_COLUMNS
 )
 
 st.set_page_config(page_title="Martha la Compta", page_icon="📊", layout="centered")
@@ -34,8 +33,9 @@ def check_password() -> None:
     """
     try:
         expected = st.secrets["app_password"]
-    except Exception:
-        # No secrets.toml or no "app_password" key: open access (local usage)
+    except (KeyError, FileNotFoundError):
+        # No secrets.toml (StreamlitSecretNotFoundError subclasses
+        # FileNotFoundError) or no "app_password" key: open access (local usage)
         return
 
     if st.session_state.get("password_ok"):
@@ -44,7 +44,7 @@ def check_password() -> None:
     password = st.text_input("🔒 Mot de passe", type="password")
     if not password:
         st.stop()
-    if hmac.compare_digest(str(password), str(expected)):
+    if hmac.compare_digest(password.encode("utf-8"), str(expected).encode("utf-8")):
         st.session_state["password_ok"] = True
         return
     st.error("Mot de passe incorrect.")
@@ -89,9 +89,10 @@ if uploaded_file:
                 for d in rounding_diffs
             )
             st.warning(
-                "⚠️ Écart d'arrondi supérieur à 0,05 € détecté sur certaines factures "
+                "⚠️ Écart supérieur à 0,05 € détecté sur certaines factures "
                 "(différence entre le total TTC déclaré et la somme des lignes). "
-                "L'écart a été absorbé dans les ventes TVA 20%, mais vérifiez ces factures dans Suffio :\n\n"
+                "Le journal est construit à partir de la somme des lignes ; "
+                "le total déclaré par Suffio est ignoré. Vérifiez ces factures dans Suffio :\n\n"
                 + details
             )
 
