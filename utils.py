@@ -125,21 +125,27 @@ def _safe_decimal(value) -> Decimal:
     return Decimal(str(value).strip().replace(",", "."))
 
 
-def read_invoices(csv_path: str) -> pd.DataFrame:
+def read_invoices(csv_source) -> pd.DataFrame:
     """
-    Read a Suffio invoice export CSV and extract per-invoice accounting amounts.
-    
+    Read a Suffio invoice export and extract per-invoice accounting amounts.
+
+    Args:
+        csv_source: An already-decoded text source: a file-like object
+            (e.g. io.StringIO) or a path to a text file. Decoding from bytes
+            must happen upstream (see is_valid_csv for encoding detection),
+            so the file is decoded exactly once.
+
     The Suffio format has multiple rows per invoice (one per line item).
     The first row of each invoice carries invoice-level data (Number, Issue date,
     Invoice total, etc.), while subsequent rows only carry line-item data.
-    
+
     Returns a DataFrame with one row per invoice and columns:
         number, date, total_ttc, tva_20, tva_55, sales_20_ht, sales_55_ht, shipping_ht
-    
+
     Returns are detected via the 'Amount due' column (non-zero = return) and have
     their amounts negated so they subtract from daily totals during aggregation.
     """
-    df = pd.read_csv(csv_path, encoding="utf-8", dtype=str)
+    df = pd.read_csv(csv_source, dtype=str)
     
     # Forward-fill the invoice Number so every line item row knows its parent invoice
     df["Number"] = df["Number"].replace("", pd.NA)
@@ -152,7 +158,7 @@ def read_invoices(csv_path: str) -> pd.DataFrame:
     invoice_header = df.groupby("Number").first().reset_index()
     
     invoices = []
-    
+
     for _, header in invoice_header.iterrows():
         inv_number = header["Number"]
         
@@ -221,7 +227,7 @@ def read_invoices(csv_path: str) -> pd.DataFrame:
         credits_sum = tva_20 + tva_55 + sales_20_ht + sales_55_ht + shipping_ht
         if (diff := total_ttc - credits_sum) != 0:
             sales_20_ht += diff
-        
+
         # Apply sign (returns become negative)
         invoices.append({
             "number": inv_number,
