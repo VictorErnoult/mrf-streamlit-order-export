@@ -44,12 +44,25 @@ if uploaded_file:
     # Process entirely in memory (no temp file on disk)
     try:
         content_str = content_bytes.decode(detected_encoding)
-        invoices_df = read_invoices(io.StringIO(content_str))
+        invoices_df, rounding_diffs = read_invoices(io.StringIO(content_str))
         daily_df = aggregate_by_date(invoices_df)
         entries_df = generate_entries(daily_df)
 
         # Success message
         st.success(f"✓ {len(invoices_df)} factures lues · {len(daily_df)} jours · {len(entries_df)} écritures")
+
+        # Warn if some invoices have a suspicious rounding difference
+        if rounding_diffs:
+            details = "\n".join(
+                f"- Facture {d['number']} : écart de {d['diff']:+.2f} €"
+                for d in rounding_diffs
+            )
+            st.warning(
+                "⚠️ Écart d'arrondi supérieur à 0,05 € détecté sur certaines factures "
+                "(différence entre le total TTC déclaré et la somme des lignes). "
+                "L'écart a été absorbé dans les ventes TVA 20%, mais vérifiez ces factures dans Suffio :\n\n"
+                + details
+            )
 
         # Create downloadable Excel file
         output = io.BytesIO()

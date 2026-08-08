@@ -68,6 +68,10 @@ def is_valid_csv(content_bytes: bytes) -> tuple[bool, str, str]:
 
 JOURNAL = "VT2"
 
+# Per-invoice difference (declared TTC total vs sum of computed buckets) above
+# which the app surfaces a warning instead of silently absorbing the gap.
+ROUNDING_DIFF_THRESHOLD = Decimal("0.05")
+
 # Account numbers and labels
 ACCOUNTS = {
     "clients":     ("411200000", "Clients"),
@@ -125,7 +129,7 @@ def _safe_decimal(value) -> Decimal:
     return Decimal(str(value).strip().replace(",", "."))
 
 
-def read_invoices(csv_source) -> pd.DataFrame:
+def read_invoices(csv_source) -> tuple[pd.DataFrame, list[dict]]:
     """
     Read a Suffio invoice export and extract per-invoice accounting amounts.
 
@@ -139,8 +143,13 @@ def read_invoices(csv_source) -> pd.DataFrame:
     The first row of each invoice carries invoice-level data (Number, Issue date,
     Invoice total, etc.), while subsequent rows only carry line-item data.
 
-    Returns a DataFrame with one row per invoice and columns:
-        number, date, total_ttc, tva_20, tva_55, sales_20_ht, sales_55_ht, shipping_ht
+    Returns a tuple (invoices_df, rounding_diffs):
+        invoices_df: DataFrame with one row per invoice and columns:
+            number, date, total_ttc, tva_20, tva_55, sales_20_ht, sales_55_ht, shipping_ht
+        rounding_diffs: list of {"number": str, "diff": float} for invoices whose
+            declared 'Invoice total' differs from the sum of computed buckets by
+            more than ROUNDING_DIFF_THRESHOLD (the diff is still absorbed into
+            the 20% sales bucket, but the caller should warn the user).
 
     Returns are detected via the 'Amount due' column (non-zero = return) and have
     their amounts negated so they subtract from daily totals during aggregation.
@@ -158,6 +167,7 @@ def read_invoices(csv_source) -> pd.DataFrame:
     invoice_header = df.groupby("Number").first().reset_index()
     
     invoices = []
+    rounding_diffs = []
 
     for _, header in invoice_header.iterrows():
         inv_number = header["Number"]
@@ -228,6 +238,16 @@ def read_invoices(csv_source) -> pd.DataFrame:
         if (diff := total_ttc - credits_sum) != 0:
             sales_20_ht += diff
 
+        # Sanity check: the declared invoice total should match the line-derived
+        # total. Small gaps are normal rounding; anything above the threshold is
+        # suspicious (malformed export) and gets reported to the caller instead
+        # of being silently absorbed.
+        declared_diff = invoice_total - total_ttc if invoice_total != 0 else Decimal("0")
+        if max(abs(diff), abs(declared_diff)) > ROUNDING_DIFF_THRESHOLD:
+            reported = declared_diff if abs(declared_diff) >= abs(diff) else diff
+            rounding_diffs.append({"number": inv_number, "diff": float(reported)})
+
+
         # Apply sign (returns become negative)
         invoices.append({
             "number": inv_number,
@@ -240,7 +260,7 @@ def read_invoices(csv_source) -> pd.DataFrame:
             "shipping_ht": float(sign * shipping_ht.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
         })
     
-    return pd.DataFrame(invoices)
+    return pd.DataFrame(invoices), rounding_diffs
 
 
 def aggregate_by_date(df: pd.DataFrame) -> pd.DataFrame:
